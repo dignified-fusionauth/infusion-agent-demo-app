@@ -1,0 +1,131 @@
+@import "tailwindcss";
+
+:root {
+  /* Agent / non-human-identity palette — a control-plane console feel, distinct
+     from the siblings (Bank's warm ledger, Works' indigo cardstock, Market's
+     violet marketplace). Cool slate + a teal "signal path" brand. FusionAuth
+     orange stays reserved for step-up / attention moments, exactly as the
+     siblings reserve it. Brand anchor: #F58320 primary, #1E293B accent, #FFFFFF. */
+  --color-ink: #0f172a; /* primary text / dark surfaces (hero, nav) */
+  --color-ink-soft: #55627a; /* secondary text */
+  --color-surface: #eef2f6; /* page background — cool console gray */
+  --color-card: #ffffff; /* raised surfaces */
+  --color-line: #dbe2ec; /* hairline on light surfaces */
+  --color-brand: #0d9488; /* InFusion Agent teal — nav, links, active state */
+  --color-brand-ink: #0f766e; /* text-safe teal on light backgrounds */
+  --color-brand-soft: #d4efe9; /* teal tint fill */
+  --color-signal: #f58320; /* FusionAuth orange — step-up / re-verify */
+  --color-signal-ink: #9a4e0a; /* text-safe orange on light backgrounds */
+  --color-signal-soft: #fdecd8;
+  --color-verified: #1f8a70; /* teal-green — ALLOWED in the trace */
+  --color-verified-soft: #e2f2ec;
+  --color-denied: #b42318; /* red — DENIED in the trace */
+  --color-denied-soft: #fbe3df;
+}
+
+@theme inline {
+  --color-ink: var(--color-ink);
+  --color-ink-soft: var(--color-ink-soft);
+  --color-surface: var(--color-surface);
+  --color-card: var(--color-card);
+  --color-line: var(--color-line);
+  --color-brand: var(--color-brand);
+  --color-brand-ink: var(--color-brand-ink);
+  --color-brand-soft: var(--color-brand-soft);
+  --color-signal: var(--color-signal);
+  --color-signal-ink: var(--color-signal-ink);
+  --color-signal-soft: var(--color-signal-soft);
+  --color-verified: var(--color-verified);
+  --color-verified-soft: var(--color-verified-soft);
+  --color-denied: var(--color-denied);
+  --color-denied-soft: var(--color-denied-soft);
+
+  --font-display: var(--font-display);
+  --font-body: var(--font-body);
+  --font-mono: var(--font-mono);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .ia-animate-in {
+    animation: ia-fade-up 0.4s ease-out both;
+  }
+}
+
+@keyframes ia-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* --- Signature visual element: the authorization "signal path" ------------ */
+/* A thin routed line with a node, used down the left edge of trace steps to
+   read as a request travelling through checkpoints. */
+.ia-rail {
+  position: relative;
+  padding-left: 1.25rem;
+}
+
+.ia-rail::before {
+  content: "";
+  position: absolute;
+  left: 0.3rem;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: repeating-linear-gradient(
+    180deg,
+    var(--color-line) 0,
+    var(--color-line) 6px,
+    transparent 6px,
+    transparent 10px
+  );
+}
+
+.ia-node::before {
+  content: "";
+  position: absolute;
+  left: 0.05rem;
+  top: 0.55rem;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 999px;
+  background: var(--color-card);
+  border: 2px solid currentColor;
+}
+
+/* Perforated tear line — shared portfolio motif, used on the step-up slip. */
+.ia-perforated {
+  position: relative;
+}
+
+.ia-perforated::before {
+  content: "";
+  position: absolute;
+  top: -1px;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background-image: radial-gradient(
+    circle at center,
+    var(--color-card) 2px,
+    transparent 2.5px
+  );
+  background-size: 14px 1px;
+  background-repeat: repeat-x;
+}
+
+::selection {
+  background: var(--color-brand);
+  color: #ffffff;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
