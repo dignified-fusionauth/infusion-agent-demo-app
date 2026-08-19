@@ -2,6 +2,12 @@ import { redirect } from "next/navigation";
 import Shell from "@/components/Shell";
 import NonHumanIdentityCard from "@/components/NonHumanIdentityCard";
 import AccountLinks from "@/components/AccountLinks";
+import FgaModeBanner from "@/components/FgaModeBanner";
+import FgaSchemaViewer from "@/components/FgaSchemaViewer";
+import FgaRelationshipAdmin, {
+  type FgaEntityChoice,
+  type FgaEntityRow,
+} from "@/components/FgaRelationshipAdmin";
 import { getSession } from "@/lib/session";
 import { isAdmin, primaryRoleBadge } from "@/lib/roles";
 import {
@@ -11,6 +17,13 @@ import {
   twoFactorManagementUrl,
 } from "@/lib/fusionauth";
 import { SCOPE_CATALOG } from "@/lib/scopes";
+import { unsupportedScopeIds } from "@/lib/bff";
+import {
+  AGENT_SCHEMA,
+  ensureFgaBootstrap,
+  fgaEntityOptions,
+  relationshipTable,
+} from "@/lib/fga";
 
 export const dynamic = "force-dynamic";
 
@@ -19,18 +32,56 @@ export const dynamic = "force-dynamic";
  * gate is HERE, off the verified access-token `roles` claim — a signed-in
  * non-admin is bounced to /chat. Shows the canonical scope catalog, the two
  * FusionAuth identities (the user-login Application vs. the MCP tool server's own
- * Client-Credentials Entity), and which demo users hold which roles.
+ * Client-Credentials Entity), which demo users hold which roles, and the FGA
+ * relationship graph those scopes are layered on top of.
+ *
+ * The FGA section is where the two halves of the platform meet: an Application ROLE
+ * gates this page, and what you edit inside it are Permify RELATIONS. Revoke a relation
+ * here and the next chat turn changes — same token, same scopes, different answer.
  */
 export default async function AdminPage() {
   const session = await getSession();
   if (!session) redirect("/api/auth/login?redirect_uri=/admin");
   if (!isAdmin(session.roles)) redirect("/chat");
 
-  // Both degrade honestly: null identity → "not connected"; null roster → "unavailable".
-  const [mcp, users] = await Promise.all([
+  // All degrade honestly: null identity → "not connected"; null roster → "unavailable";
+  // unreachable Permify → the in-memory fallback plus a banner that says so.
+  const [mcp, users, fgaMode] = await Promise.all([
     getMcpServiceIdentity(),
     searchTenantUsers(),
+    // Bootstrap only — never seed from /admin, or opening this page would hand the
+    // viewer the demo relations for their role.
+    ensureFgaBootstrap(),
   ]);
+  const fgaTable = await relationshipTable();
+  // Scopes this FusionAuth Application turned out not to define. The login learned it the
+  // hard way (see lib/bff.ts) and dropped them; saying so here is how a setup gap gets
+  // noticed instead of quietly disabling a tool.
+  const missingScopes = new Set(unsupportedScopeIds());
+
+  // Resolve raw Permify subject ids to something human, reusing the roster this page
+  // already fetched. An id with no match still renders — as itself.
+  const nameById = new Map(
+    (users ?? []).map((u) => [u.id, u.name || u.email || u.id])
+  );
+  const fgaEntities: FgaEntityChoice[] = fgaEntityOptions().map((o) => ({
+    type: o.entityType,
+    id: o.entityId,
+    label: o.label,
+    relations: o.relations,
+  }));
+  const fgaRows: FgaEntityRow[] = fgaTable.map((row) => ({
+    entityType: row.entityType,
+    entityId: row.entityId,
+    label: row.label,
+    groups: row.rows.map((r) => ({
+      relation: r.relation,
+      members: r.userIds.map((id) => ({
+        userId: id,
+        label: nameById.get(id) ?? id,
+      })),
+    })),
+  }));
 
   return (
     <Shell session={session}>
@@ -56,6 +107,16 @@ export default async function AdminPage() {
             One source of truth (<code className="font-[family-name:var(--font-mono)] text-xs">lib/scopes.ts</code>)
             used by login (which scopes to request), the sandbox pre-check, and
             the MCP server. A tool needs its scope <em>and</em> an allowed role.
+            {missingScopes.size > 0 ? (
+              <>
+                {" "}
+                A scope marked <em>not on this instance</em> isn&rsquo;t defined on the
+                FusionAuth Application, so logins skip it rather than failing outright
+                and its tool is denied at the sandbox. Add it under{" "}
+                <strong className="text-ink">Applications → OAuth → Scopes</strong>, then
+                restart the app.
+              </>
+            ) : null}
           </p>
         </div>
         <div className="overflow-x-auto">
@@ -72,9 +133,26 @@ export default async function AdminPage() {
               {SCOPE_CATALOG.map((s) => (
                 <tr key={s.id}>
                   <td className="px-5 py-2">
-                    <code className="text-brand-ink font-[family-name:var(--font-mono)] text-xs">
-                      {s.id}
-                    </code>
+                    {s.id ? (
+                      <code className="text-brand-ink font-[family-name:var(--font-mono)] text-xs">
+                        {s.id}
+                      </code>
+                    ) : (
+                      <span
+                        className="text-xs text-ink-soft"
+                        title="This tool carries no dedicated OAuth scope, so the role gate is the only app-level check. Add tools:docs.read on the Application and set its id in lib/scopes.ts to gate it on egress consent instead."
+                      >
+                        — none · role-gated
+                      </span>
+                    )}
+                    {s.id && missingScopes.has(s.id) ? (
+                      <span
+                        className="ml-2 rounded-full bg-signal-soft px-2 py-0.5 text-[0.65rem] font-semibold text-signal-ink"
+                        title="This Application doesn't define the scope, so logins skip it and the tool is denied at the sandbox. Add it under FusionAuth → Applications → OAuth → Scopes, then restart the app."
+                      >
+                        not on this instance
+                      </span>
+                    ) : null}
                   </td>
                   <td className="px-5 py-2 font-[family-name:var(--font-mono)] text-xs text-ink">
                     {s.tool}
@@ -117,6 +195,24 @@ export default async function AdminPage() {
           }}
           mcp={mcp}
         />
+      </section>
+
+      {/* FusionAuth FGA — the resource layer */}
+      <section className="mt-8">
+        <h2 className="font-bold text-ink font-[family-name:var(--font-display)]">
+          FusionAuth FGA (Permify)
+        </h2>
+        <p className="mb-3 text-sm text-ink-soft">
+          Scopes above decide whether a tool may run at all. The relations below decide{" "}
+          <em>which</em> resources it may touch — whose payroll, whose PTO, which
+          documents. Grant or revoke one and the next chat turn changes, with no new
+          token and no scope change.
+        </p>
+        <div className="space-y-4">
+          <FgaModeBanner mode={fgaMode} />
+          <FgaSchemaViewer schema={AGENT_SCHEMA} />
+          <FgaRelationshipAdmin entities={fgaEntities} initial={fgaRows} />
+        </div>
       </section>
 
       {/* Demo users + roles (a proxy for who can consent to what) */}

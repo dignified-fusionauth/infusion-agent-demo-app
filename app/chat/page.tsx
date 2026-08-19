@@ -1,10 +1,12 @@
 import { redirect } from "next/navigation";
 import Shell from "@/components/Shell";
 import AgentModeBanner from "@/components/AgentModeBanner";
+import FgaModeBanner from "@/components/FgaModeBanner";
 import ChatWindow from "@/components/ChatWindow";
 import { getSession } from "@/lib/session";
 import { agentMode } from "@/lib/agent";
 import { primaryAgentRole } from "@/lib/roles";
+import { syncUserFga } from "@/lib/fga";
 
 export const dynamic = "force-dynamic";
 
@@ -12,12 +14,18 @@ export const dynamic = "force-dynamic";
  * "Ask Fusion" — the chat surface next to the live authorization trace. proxy.ts
  * gates on the session cookie's presence; this page does the real verification
  * via getSession() and reads the granted scopes off the verified token.
+ *
+ * It also warms the FGA layer before the first turn: syncUserFga loads the Permify
+ * schema, writes the company graph, and seeds this user's demo relations (once), then
+ * reports whether that happened against a live server or the in-memory fallback — which
+ * is what FgaModeBanner tells the viewer.
  */
 export default async function ChatPage() {
   const session = await getSession();
   if (!session) redirect("/api/auth/login?redirect_uri=/chat");
 
   const mode = agentMode();
+  const fgaMode = await syncUserFga(session.userId, session.roles);
   const role = primaryAgentRole(session.roles);
 
   return (
@@ -35,11 +43,12 @@ export default async function ChatPage() {
         </div>
       </div>
 
-      <div className="mb-5">
+      <div className="mb-5 space-y-3">
         <AgentModeBanner mode={mode} />
+        <FgaModeBanner mode={fgaMode} />
       </div>
 
-      <ChatWindow />
+      <ChatWindow initialMode={mode} />
     </Shell>
   );
 }

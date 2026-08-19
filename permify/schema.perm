@@ -1,0 +1,85 @@
+// InFusion Agent — FusionAuth FGA (by Permify) schema.
+//
+// The THIRD authorization layer in this demo, and the only one that can answer a
+// question about a *specific resource*. The first two layers are coarse and
+// per-class: the agent's sandbox and the MCP resource server both ask "does this
+// token carry `tools:payroll.read`, and is this role permitted?" (lib/scopes.ts +
+// lib/roles.ts). Neither can answer *whose* payroll, *whose* PTO, or *which*
+// documents — those answers depend on a RELATIONSHIP, which is what this schema
+// models. Load it into a running Permify instance with:
+//
+//   POST /v1/tenants/{tenant}/schemas/write   { "schema": "<contents of this file>" }
+//
+// (lib/fga.ts keeps a byte-identical copy in the AGENT_SCHEMA constant and loads it
+// for you on first use — see `bootstrap`. This .perm file is the human-readable /
+// IDE / Docker-seed copy. Keep the two in sync.)
+//
+// The payoff to demo: ONE tuple — `team:platform#manager@user:<you>` — is enough to
+//   * pass `team:platform#view_payroll`               (payroll narrows to Platform),
+//   * pass `employee:ada-okafor#adjust_pto`           (2 hops: employee → team),
+//   * pass `kb_doc:<platform-readable doc>#read`      (3 hops: doc → space → team),
+// with ZERO app-code traversal. Permify's PermissionService reaches through the
+// relations; the app just asks.
+//
+// Note what is deliberately NOT here: `lookup_employee` and `create_it_ticket` get
+// no FGA check at all. The directory is company-wide by design, and a new ticket has
+// no pre-existing resource to be related to. Not every tool needs resource-level
+// authorization, and pretending otherwise would make the demo dishonest.
+
+entity user {}
+
+entity organization {
+  // Company-wide authorities. HR is the People/payroll escalation path; it_admin is
+  // the IT escalation path. Both are org-level, so one tuple reaches every team.
+  relation hr @user
+  relation it_admin @user
+
+  permission all_teams = hr or it_admin
+}
+
+entity team {
+  // The owning organization — this relation is what makes the cascade real. Write
+  // `team:X#org@organization:infusion` once and every org-level check flows through it.
+  relation org @organization
+
+  // Team-level grants, written directly on the team.
+  relation manager @user
+  relation member @user
+
+  // `org.hr` reaches UP the `org` relation into the organization and checks its `hr`,
+  // so an HR grant passes these on every team without any per-team tuple. Note that
+  // it_admin is deliberately absent from view_payroll: running IT does not make
+  // payroll your business.
+  permission view_payroll  = manager or org.hr
+  permission manage_people = manager or org.hr
+  permission read_space    = member or manager or org.all_teams
+}
+
+entity employee {
+  // The team the employee belongs to.
+  relation team @team
+
+  // Two hops: employee → team → (manager | org.hr). A Platform manager may adjust
+  // PTO for anyone on Platform and nobody else — the check `tools:pto.write` cannot
+  // express, no matter how the scope is named.
+  permission adjust_pto = team.manage_people
+}
+
+entity kb_space {
+  // The team whose members may read this space, plus a direct per-user grant for
+  // one-off access that shouldn't imply team membership.
+  relation team @team
+  relation reader @user
+
+  permission read = reader or team.read_space
+}
+
+entity kb_doc {
+  relation space @kb_space
+  relation reader @user
+
+  // Document-level ACLs for a retriever — the canonical FGA-for-AI problem. RAG
+  // results are filtered by this check, so a document the caller can't reach never
+  // enters the context window at all.
+  permission read = reader or space.read
+}

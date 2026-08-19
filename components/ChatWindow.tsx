@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import AuthorizationTrace from "@/components/AuthorizationTrace";
+import ArchitectureDiagram from "@/components/ArchitectureDiagram";
 import StepUpSlip, { type StepUpMethod } from "@/components/StepUpSlip";
 import type { TraceStep, ChatResponse } from "@/lib/agent";
 
@@ -20,11 +21,24 @@ interface PendingSlip {
   error?: string;
 }
 
+/**
+ * The starter prompts, ordered so clicking straight down them walks the whole story:
+ * an internal read anyone can do; a directory lookup that has no resource dimension;
+ * the same colleague's PTO, which does (and is where FGA refuses); payroll, which FGA
+ * narrows rather than refuses; the one tool that leaves the network; and finally a
+ * question no tool can serve at all.
+ *
+ * Each one is a different outcome in the trace, not just a different topic — the point
+ * of the chips is that a viewer can produce every authorization state without knowing
+ * what to type.
+ */
 const SUGGESTIONS = [
   "What's our PTO policy?",
-  "Show me last month's payroll numbers",
   "Look up Chen Li in the directory",
-  "My VPN keeps dropping — open a ticket",
+  "Adjust Chen Li's PTO by -2 days",
+  "Show me last month's payroll numbers",
+  "What is a FusionAuth Entity?",
+  "What's the capital of Norway?",
 ];
 
 async function postChat(body: unknown): Promise<ChatResponse> {
@@ -41,9 +55,19 @@ async function postChat(body: unknown): Promise<ChatResponse> {
  * the whole turn client-side: send → (step-up round trip if the server asks) →
  * resume, accumulating trace steps as each phase reports back.
  */
-export default function ChatWindow() {
+export default function ChatWindow({
+  initialMode = "scripted",
+}: {
+  /**
+   * The mode the server reports (agentMode()). Seeding state with it keeps the diagram's
+   * planner label agreeing with the banner above it before the first turn; from then on
+   * each response's own `mode` wins, so an honest degrade still shows through.
+   */
+  initialMode?: "live" | "scripted";
+}) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [trace, setTrace] = useState<TraceStep[]>([]);
+  const [mode, setMode] = useState<"live" | "scripted">(initialMode);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [slip, setSlip] = useState<PendingSlip | null>(null);
@@ -58,6 +82,7 @@ export default function ChatWindow() {
 
   async function handleResponse(res: ChatResponse) {
     appendTrace(res.trace);
+    setMode(res.mode);
     if (res.kind === "reply") {
       pushAssistant(res.reply);
       setBusy(false);
@@ -170,15 +195,19 @@ export default function ChatWindow() {
   }
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[1.1fr_1fr]">
-      {/* Chat column */}
-      <div className="flex min-h-[28rem] flex-col rounded-xl border border-line bg-card shadow-sm">
+    <div className="space-y-6">
+
+      <div className="grid gap-6 lg:grid-cols-[1.1fr_1fr]">
+        {/* Chat column */}
+        <div className="flex min-h-[28rem] flex-col rounded-xl border border-line bg-card shadow-sm">
         <div className="flex-1 space-y-3 overflow-y-auto px-5 py-4">
           {messages.length === 0 ? (
             <div className="text-sm text-ink-soft">
               <p>
-                Ask Fusion can search the knowledge base, open IT tickets, look up
-                colleagues, and (with the right scopes) view payroll or adjust PTO.
+                Ask Fusion checks its five internal tools first — the knowledge base, the
+                directory, IT tickets, and (with the right scopes) payroll and PTO. Only
+                then may it ask a third-party server about public documentation, and only
+                if nothing else fits does it answer from the model&rsquo;s own knowledge.
               </p>
               <div className="mt-4 flex flex-wrap gap-2">
                 {SUGGESTIONS.map((s) => (
@@ -255,7 +284,9 @@ export default function ChatWindow() {
       </div>
 
       {/* Trace column */}
-      <AuthorizationTrace steps={trace} />
+        <AuthorizationTrace steps={trace} />
+      </div>
+      <ArchitectureDiagram steps={trace} mode={mode} />
     </div>
   );
 }

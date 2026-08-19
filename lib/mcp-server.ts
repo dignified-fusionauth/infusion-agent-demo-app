@@ -12,6 +12,15 @@ import {
   formatCents,
   adjustPtoBalance,
 } from "@/lib/payroll";
+import {
+  ensureFgaBootstrap,
+  visiblePayrollTeams,
+  canAdjustPto,
+  readableDocIds,
+  type FgaReport,
+} from "@/lib/fga";
+import { employeeIdForName, employeeName } from "@/lib/org-graph";
+import { askPublicDocs, externalDocsConfig } from "@/lib/external-docs";
 
 /**
  * The MCP tool registry + handlers. Registered onto the McpServer that
@@ -25,9 +34,22 @@ import {
  * required scope AND the caller's role is permitted for it. So a scope FusionAuth
  * mis-issues to the wrong role can't unlock a tool by itself.
  *
+ * Passing that gate only settles whether the tool may RUN. Three of the handlers then
+ * ask a second, different question — FusionAuth FGA by Permify (lib/fga.ts) — about the
+ * specific RESOURCES involved: which teams' payroll, whose PTO, which documents. Scope
+ * is per-class and can't express "the team you manage"; a relation can. So a caller who
+ * passed every check above still gets a filtered payroll summary, or a flat refusal on
+ * an employee outside their team.
+ *
+ * One handler — `search_public_docs` — reaches OUTSIDE the company instead of inside it,
+ * and it runs behind the same gate as the rest. The employee's bearer token is not
+ * forwarded past that gate; see lib/external-docs.ts for why, and for why the answer it
+ * returns is treated strictly as untrusted data.
+ *
  * Handlers return a JSON string in a single text block: `{ ok: true, data }` on
- * success, or `{ ok: false, error: "missing_scope" | "role_not_permitted" }`
- * (with isError) — which the agent renders as an MCP-level DENIED in the trace.
+ * success, or `{ ok: false, error: "missing_scope" | "role_not_permitted" |
+ * "fga_denied" }` (with isError) — which the agent renders as a scope-level vs.
+ * resource-level DENIED in the trace, deliberately distinct from each other.
  */
 
 interface ToolResult {
@@ -76,6 +98,33 @@ function denyRole(tool: ToolName): ToolResult {
 }
 
 /**
+ * A resource-level refusal from the FGA layer. Deliberately a different `error` from
+ * the scope/role denials above: "your token may not use this tool" and "your relations
+ * don't reach this resource" are different failures, and the trace shows them as
+ * different layers.
+ */
+function denyFga(
+  entity: string,
+  permission: string,
+  message: string,
+  fga: FgaReport
+): ToolResult {
+  return errorResult({
+    ok: false,
+    error: "fga_denied",
+    entity,
+    permission,
+    message,
+    fga,
+  });
+}
+
+/** The subject FGA checks run as: the `sub` off the independently-verified token. */
+function subjectFor(authInfo: AuthInfo | undefined): string {
+  return (authInfo?.extra?.sub as string | undefined) ?? "";
+}
+
+/**
  * The MCP server's own authorization gate — scope AND role, checked
  * independently of the agent sandbox. Returns a deny result to return directly,
  * or null when the caller may proceed.
@@ -89,7 +138,7 @@ function authGate(tool: ToolName, authInfo: AuthInfo | undefined): ToolResult | 
   return null;
 }
 
-/** Registers all five InFusion Agent tools onto the MCP server. */
+/** Registers all six InFusion Agent tools onto the MCP server — five internal, one external. */
 export function registerAgentTools(server: McpServer): void {
   server.registerTool(
     "search_knowledge_base",
@@ -105,16 +154,32 @@ export function registerAgentTools(server: McpServer): void {
       const denied = authGate("search_knowledge_base", ctx.http?.authInfo);
       if (denied) return denied;
       const scopes = ctx.http?.authInfo?.scopes ?? [];
+
+      // 1. The OAuth dimension: filter the corpus to what these scopes may see, then
+      //    rank. An article the scopes exclude is never scored (lib/knowledge-base.ts).
       const ranked = searchKnowledgeBase(query, scopes);
+
+      // 2. The FGA dimension: ask Permify `kb_doc:<id>#read` for every survivor that
+      //    belongs to a space. Document-level ACLs, resolved through the doc's space to
+      //    a team — so a doc the caller can't reach never enters the context window.
+      await ensureFgaBootstrap();
+      const { readable, report } = await readableDocIds(
+        subjectFor(ctx.http?.authInfo),
+        ranked.map((r) => r.article.id)
+      );
+      const allowed = ranked.filter((r) => readable.includes(r.article.id));
+
       return ok({
         query,
-        results: ranked.map((r) => ({
+        results: allowed.map((r) => ({
           id: r.article.id,
           title: r.article.title,
           body: r.article.body,
           score: r.score,
         })),
         hiddenByScope: hiddenArticleCount(scopes),
+        hiddenByFga: ranked.length - allowed.length,
+        fga: report,
       });
     }
   );
@@ -201,14 +266,37 @@ export function registerAgentTools(server: McpServer): void {
     async (ctx) => {
       const denied = authGate("view_payroll", ctx.http?.authInfo);
       if (denied) return denied;
+
+      // The scope said "payroll". FGA says WHICH payroll: one `team#view_payroll`
+      // check per team. A team manager sees their own team; an org-level `hr` grant
+      // cascades to every team with no per-team tuple.
+      await ensureFgaBootstrap();
+      const { teamIds, report } = await visiblePayrollTeams(
+        subjectFor(ctx.http?.authInfo)
+      );
+      if (teamIds.length === 0) {
+        return denyFga(
+          "team:*",
+          "view_payroll",
+          "Your token carries tools:payroll.read, but your FGA relations don't reach " +
+            "any team's payroll. Payroll needs `team#manager` on a team, or " +
+            "`organization#hr` to cascade to all of them.",
+          report
+        );
+      }
+
+      const lines = PAYROLL_SUMMARY.filter((l) => teamIds.includes(l.id));
       return ok({
         month: "last month",
-        totalMonthlyGross: formatCents(payrollTotalCents()),
-        teams: PAYROLL_SUMMARY.map((l) => ({
+        // The total covers only the teams this caller may read — never the
+        // company-wide figure with rows quietly removed.
+        totalMonthlyGross: formatCents(payrollTotalCents(lines)),
+        teams: lines.map((l) => ({
           team: l.team,
           headcount: l.headcount,
           monthlyGross: formatCents(l.monthlyGrossCents),
         })),
+        fga: report,
       });
     }
   );
@@ -229,6 +317,41 @@ export function registerAgentTools(server: McpServer): void {
     async ({ employee, deltaDays }, ctx) => {
       const denied = authGate("update_pto_balance", ctx.http?.authInfo);
       if (denied) return denied;
+
+      // Resolve the name to an FGA entity BEFORE mutating anything.
+      const employeeId = employeeIdForName(employee);
+      if (!employeeId) {
+        const payload = {
+          ok: false,
+          error: "unknown_employee",
+          message: `No PTO record for "${employee}".`,
+        };
+        return {
+          content: [{ type: "text", text: JSON.stringify(payload) }],
+          structuredContent: payload,
+          isError: true,
+        };
+      }
+
+      // The resource-level question the scope can't answer: not "may you write PTO"
+      // but "may you write THIS person's PTO". Two hops in the schema —
+      // employee → team → (manager | org.hr).
+      await ensureFgaBootstrap();
+      const { allowed, report } = await canAdjustPto(
+        subjectFor(ctx.http?.authInfo),
+        employeeId
+      );
+      if (!allowed) {
+        return denyFga(
+          `employee:${employeeId}`,
+          "adjust_pto",
+          `Your relations don't let you adjust PTO for ${
+            employeeName(employeeId) ?? employee
+          }. That needs \`manager\` on their team, or \`hr\` on the organization.`,
+          report
+        );
+      }
+
       const updated = adjustPtoBalance(employee, deltaDays);
       if (!updated) {
         const payload = {
@@ -242,7 +365,55 @@ export function registerAgentTools(server: McpServer): void {
           isError: true,
         };
       }
-      return ok({ updated });
+      return ok({ updated, fga: report });
+    }
+  );
+
+  server.registerTool(
+    "search_public_docs",
+    {
+      title: "Search public documentation",
+      description:
+        "Ask about the PUBLIC documentation for the platform this assistant runs on — " +
+        "FusionAuth, the Model Context Protocol, and Permify. This is the only tool that " +
+        "leaves the company network: it calls a third-party MCP server and returns public " +
+        "information. It knows nothing about this company, its people, or its data — use " +
+        "an internal tool for anything of that kind.",
+      inputSchema: z.object({
+        question: z
+          .string()
+          .describe("The question to ask the public documentation."),
+      }),
+    },
+    async ({ question }, ctx) => {
+      // Same gate as every internal tool — here the role gate is the whole of it, because
+      // this tool ships without a dedicated scope (see lib/scopes.ts for why, and for how
+      // to put it back behind an egress-consent scope).
+      const denied = authGate("search_public_docs", ctx.http?.authInfo);
+      if (denied) return denied;
+
+      // No FGA check here, deliberately: there is no per-resource dimension to filter.
+      // It is one public endpoint with a fixed remit, and the only interesting question —
+      // may this agent leave the network at all — is what the scope already answers.
+      const result = await askPublicDocs(question);
+      if (!result.ok) {
+        return errorResult({
+          ok: false,
+          error: "external_unavailable",
+          message:
+            `The external documentation server (${result.server}) didn't answer: ` +
+            `${result.reason ?? "unknown error"}`,
+        });
+      }
+      return ok({
+        question,
+        // Untrusted third-party content. Displayed and attributed, never acted on.
+        answer: result.answer,
+        server: result.server,
+        repos: result.repos,
+        external: true,
+        toolName: externalDocsConfig.toolName,
+      });
     }
   );
 }

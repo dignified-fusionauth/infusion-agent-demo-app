@@ -21,6 +21,9 @@
   --color-verified-soft: #e2f2ec;
   --color-denied: #b42318; /* red — DENIED in the trace */
   --color-denied-soft: #fbe3df;
+  --color-fga: #6d4aff; /* violet — the FGA / Permify resource layer */
+  --color-fga-ink: #4c33c7; /* text-safe violet on light backgrounds */
+  --color-fga-soft: #ece7ff;
 }
 
 @theme inline {
@@ -39,6 +42,9 @@
   --color-verified-soft: var(--color-verified-soft);
   --color-denied: var(--color-denied);
   --color-denied-soft: var(--color-denied-soft);
+  --color-fga: var(--color-fga);
+  --color-fga-ink: var(--color-fga-ink);
+  --color-fga-soft: var(--color-fga-soft);
 
   --font-display: var(--font-display);
   --font-body: var(--font-body);
@@ -67,13 +73,12 @@
    read as a request travelling through checkpoints. */
 .ia-rail {
   position: relative;
-  padding-left: 1.25rem;
 }
 
 .ia-rail::before {
   content: "";
   position: absolute;
-  left: 0.3rem;
+  left: 1.5rem;
   top: 0;
   bottom: 0;
   width: 2px;
@@ -86,10 +91,15 @@
   );
 }
 
+.ia-node {
+  position: relative;
+  padding-left: 1.25rem;
+}
+
 .ia-node::before {
   content: "";
   position: absolute;
-  left: 0.05rem;
+  left: 0.06rem;
   top: 0.55rem;
   width: 0.55rem;
   height: 0.55rem;
@@ -117,6 +127,35 @@
   );
   background-size: 14px 1px;
   background-repeat: repeat-x;
+}
+
+/* --- Interactive architecture diagram ------------------------------------- */
+/* Edges animate a travelling dash while a phase is active; the active node
+   pulses its stroke. Both gated on prefers-reduced-motion. */
+@keyframes ia-edge-dash {
+  to {
+    stroke-dashoffset: -28;
+  }
+}
+
+@keyframes ia-node-pulse {
+  0%,
+  100% {
+    stroke-width: 2;
+  }
+  50% {
+    stroke-width: 3.75;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .ia-edge-flow {
+    stroke-dasharray: 7 7;
+    animation: ia-edge-dash 0.7s linear infinite;
+  }
+  .ia-node-pulse {
+    animation: ia-node-pulse 1.2s ease-in-out infinite;
+  }
 }
 
 ::selection {

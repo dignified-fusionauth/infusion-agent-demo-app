@@ -23,17 +23,32 @@
 /** The FusionAuth Application Roles this app understands, least → most privileged. */
 export type AgentRole = "employee" | "manager" | "it-admin";
 
-/** The five tools the MCP server exposes. */
+/**
+ * The tools the MCP server exposes: five that reach internal systems on behalf of the
+ * signed-in employee, and one — `search_public_docs` — that reaches a third-party MCP
+ * server instead. The external one is gated by exactly the same machinery, because
+ * "may this agent talk to the outside world" is an authorization question too.
+ */
 export type ToolName =
   | "search_knowledge_base"
   | "create_it_ticket"
   | "lookup_employee"
   | "view_payroll"
-  | "update_pto_balance";
+  | "update_pto_balance"
+  | "search_public_docs";
 
 export interface ScopeDefinition {
-  /** The OAuth scope string, e.g. "tools:payroll.read". */
-  id: string;
+  /**
+   * The OAuth scope string, e.g. "tools:payroll.read", or `null` for a tool that needs no
+   * dedicated scope and is gated on role alone.
+   *
+   * `null` exists for a real reason rather than as a loophole: a catalog entry naming a
+   * scope the FusionAuth Application doesn't define breaks every login (FusionAuth rejects
+   * the whole authorize request — see lib/bff.ts), so a tool must be able to ship without
+   * demanding instance configuration. The role gate below still applies, and the MCP
+   * server still checks it independently; what's absent is the per-tool consent moment.
+   */
+  id: string | null;
   /** The MCP tool this scope unlocks. */
   tool: ToolName;
   /** One-line, human-readable summary for the consent preview + /admin catalog. */
@@ -96,6 +111,24 @@ export const SCOPE_CATALOG: ScopeDefinition[] = [
     requiresConsent: true,
     defaultForRoles: ["manager", "it-admin"],
   },
+  {
+    // Role-gated only, deliberately. The natural design here is a dedicated scope —
+    // `tools:docs.read` — because "may this agent send a question outside the company" is
+    // an EGRESS decision worth consenting to separately from reading payroll, and it is
+    // the one consent prompt in this app that guards no sensitive data at all.
+    //
+    // It isn't wired that way because a scope in this catalog must exist on the FusionAuth
+    // Application or no one can log in, and requiring a config change to make a tool work
+    // out of the box is the wrong default for a demo. To restore the egress-consent story:
+    // add `tools:docs.read` under Applications → OAuth → Scopes (mark it consent-required),
+    // set `id` here to "tools:docs.read", and restart.
+    id: null,
+    tool: "search_public_docs",
+    description:
+      "Ask a third-party MCP server about public documentation (leaves the network).",
+    requiresConsent: false,
+    defaultForRoles: ["employee", "manager", "it-admin"],
+  },
 ];
 
 /** The tools whose execution requires a fresh step-up (two-factor) check. */
@@ -105,12 +138,16 @@ const BY_TOOL = new Map<ToolName, ScopeDefinition>(
   SCOPE_CATALOG.map((s) => [s.tool, s])
 );
 const BY_ID = new Map<string, ScopeDefinition>(
-  SCOPE_CATALOG.map((s) => [s.id, s])
+  SCOPE_CATALOG.flatMap((s) => (s.id ? [[s.id, s] as const] : []))
 );
 
-/** The scope a tool requires, or undefined for an unknown tool name. */
+/**
+ * The scope a tool requires — undefined both for an unknown tool name and for a tool that
+ * needs no scope at all (see `ScopeDefinition.id`). Callers must treat undefined as "no
+ * scope check to run", never as "deny": the role gate is what governs those tools.
+ */
 export function scopeForTool(tool: ToolName): string | undefined {
-  return BY_TOOL.get(tool)?.id;
+  return BY_TOOL.get(tool)?.id ?? undefined;
 }
 
 /** The scope definition for a tool, if any. */
@@ -128,10 +165,10 @@ export function toolRequiresStepUp(tool: ToolName): boolean {
   return STEP_UP_TOOLS.includes(tool);
 }
 
-/** The custom tools:* scopes a role requests by default at login. */
+/** The custom tools:* scopes a role requests by default at login (skipping scopeless tools). */
 export function defaultToolScopesForRole(role: AgentRole): string[] {
-  return SCOPE_CATALOG.filter((s) => s.defaultForRoles.includes(role)).map(
-    (s) => s.id
+  return SCOPE_CATALOG.flatMap((s) =>
+    s.id && s.defaultForRoles.includes(role) ? [s.id] : []
   );
 }
 

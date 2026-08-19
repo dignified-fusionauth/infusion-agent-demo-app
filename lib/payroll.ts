@@ -18,6 +18,11 @@ export function formatCents(cents: number): string {
 }
 
 export interface PayrollLine {
+  /**
+   * The team's stable id — also its Permify `team` entity id (see lib/org-graph.ts),
+   * so the FGA check that filters this summary can't drift from the display name.
+   */
+  id: string;
   team: string;
   headcount: number;
   monthlyGrossCents: number;
@@ -25,14 +30,20 @@ export interface PayrollLine {
 
 /** Last month's payroll summary, the payload `view_payroll` returns. */
 export const PAYROLL_SUMMARY: PayrollLine[] = [
-  { team: "Platform", headcount: 12, monthlyGrossCents: 1_486_000 },
-  { team: "IT", headcount: 5, monthlyGrossCents: 512_000 },
-  { team: "People", headcount: 4, monthlyGrossCents: 396_000 },
-  { team: "Finance", headcount: 6, monthlyGrossCents: 604_000 },
+  { id: "platform", team: "Platform", headcount: 12, monthlyGrossCents: 1_486_000 },
+  { id: "it", team: "IT", headcount: 5, monthlyGrossCents: 512_000 },
+  { id: "people", team: "People", headcount: 4, monthlyGrossCents: 396_000 },
+  { id: "finance", team: "Finance", headcount: 6, monthlyGrossCents: 604_000 },
 ];
 
-export function payrollTotalCents(): number {
-  return PAYROLL_SUMMARY.reduce((sum, l) => sum + l.monthlyGrossCents, 0);
+/**
+ * Total monthly gross across `lines`, defaulting to the whole summary. The
+ * `view_payroll` tool passes only the teams the caller's FGA relations let them see,
+ * so the total it reports is the total of what they may actually read — never the
+ * company-wide figure with rows quietly removed.
+ */
+export function payrollTotalCents(lines: PayrollLine[] = PAYROLL_SUMMARY): number {
+  return lines.reduce((sum, l) => sum + l.monthlyGrossCents, 0);
 }
 
 export interface PtoBalance {

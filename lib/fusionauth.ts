@@ -592,3 +592,41 @@ export async function searchTenantUsers(): Promise<DirectoryHit[] | null> {
     return null;
   }
 }
+
+/**
+ * Resolves an email address to a FusionAuth user — the /admin FGA grant path needs a
+ * user id to write a relation tuple for, and an admin types an email. Uses
+ * `GET /api/user?email=` (the same API key permission the README already asks for), not
+ * the User Search backend, so it works on an instance without Elasticsearch.
+ *
+ * Returns null when there's no such user, or when the lookup can't run at all — the
+ * caller reports "no account with that email" either way, which is the honest answer:
+ * we can't grant a relation to a user we can't identify.
+ */
+export async function lookupUserByEmail(
+  email: string
+): Promise<DirectoryHit | null> {
+  const address = email.trim();
+  if (!address) return null;
+  try {
+    const res = await faClient().retrieveUserByEmail(address);
+    const u = res.response.user;
+    if (!u?.id) return null;
+    return {
+      id: u.id,
+      name:
+        u.fullName ||
+        [u.firstName, u.lastName].filter(Boolean).join(" ") ||
+        u.email ||
+        "Unnamed user",
+      email: u.email,
+      roles: (
+        (u.registrations ?? []).find(
+          (r) => r.applicationId === fusionAuthConfig.clientId
+        )?.roles ?? []
+      ).filter((r): r is string => typeof r === "string" && r !== ""),
+    };
+  } catch {
+    return null;
+  }
+}
